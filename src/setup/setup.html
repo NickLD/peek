@@ -73,8 +73,9 @@
     <section id="runtime" class="hidden">
       <h2>Notifications</h2>
       <div class="row">
-        <label>Cameras</label>
-        <div id="cameraList" class="camera-list"></div>
+        <label for="cameraList">Cameras</label>
+        <select id="cameraList" class="camera-list" multiple></select>
+        <span class="hint">Selected cameras show notifications. Click to toggle each one.</span>
       </div>
       <label class="check">
         <input id="sound" type="checkbox" />
@@ -91,6 +92,10 @@
       <label class="check">
         <input id="showBoundingBoxes" type="checkbox" />
         <span class="check-text">Show bounding boxes on video</span>
+      </label>
+      <label class="check">
+        <input id="dynamicSize" type="checkbox" />
+        <span class="check-text">Match the overlay size to each camera's aspect ratio</span>
       </label>
       <div class="row">
         <label for="dismiss">Dismiss after</label>

@@ -26,6 +26,8 @@ let config = null
 let prefs = null
 let pendingUpdate = null
 let appStarted = false
+let placementMode = false
+let dynamicWidth = null
 let frigatePin = null
 let frigateToken = null
 let tokenRefreshTimer = null
@@ -79,6 +81,8 @@ async function fetchFrigateConfig(token) {
   try {
     const frigateConfig = await frigateAuth.fetchConfig(config.frigateUrl, token || null)
     buildStreamMap(frigateConfig)
+    const cameras = (frigateConfig && frigateConfig.cameras) || {}
+    Object.keys(cameras).forEach(name => learnCamera(name))
   } catch (err) {
     console.error('[peek] could not fetch Frigate config: ' + err.message)
   }
@@ -101,12 +105,33 @@ function prettyName(camera) {
 }
 
 function overlaySize() {
-  return { width: config.width || 380, height: config.height || 300 }
+  const height = config.height || 300
+  if (prefs && prefs.dynamicSize !== false && dynamicWidth) {
+    return { width: dynamicWidth, height }
+  }
+  return { width: config.width || 380, height }
 }
 
 function positionWindow() {
-  const area = screen.getPrimaryDisplay().workArea
   const { width, height } = overlaySize()
+  const placement = config.placement
+  if (placement && placement.displayId != null) {
+    const display = screen.getAllDisplays().find(d => d.id === placement.displayId) || screen.getPrimaryDisplay()
+    const area = display.workArea
+    const anchorX = placement.anchorX === 'right' ? 'right' : 'left'
+    const anchorY = placement.anchorY === 'bottom' ? 'bottom' : 'top'
+    let x = anchorX === 'right'
+      ? area.x + area.width - width - (placement.offsetX || 0)
+      : area.x + (placement.offsetX || 0)
+    let y = anchorY === 'bottom'
+      ? area.y + area.height - height - (placement.offsetY || 0)
+      : area.y + (placement.offsetY || 0)
+    x = Math.max(area.x, Math.min(x, area.x + area.width - width))
+    y = Math.max(area.y, Math.min(y, area.y + area.height - height))
+    win.setBounds({ x, y, width, height })
+    return
+  }
+  const area = screen.getPrimaryDisplay().workArea
   const margin = config.margin != null ? config.margin : 24
   const corner = config.corner || 'top-right'
   let x = area.x + area.width - width - margin
@@ -114,6 +139,61 @@ function positionWindow() {
   if (corner.includes('left')) x = area.x + margin
   if (corner.includes('bottom')) y = area.y + area.height - height - margin
   win.setBounds({ x, y, width, height })
+}
+
+function setDynamicWidth(aspect) {
+  if (!prefs || prefs.dynamicSize === false) return
+  if (!aspect || !isFinite(aspect) || aspect <= 0) return
+  const height = config.height || 300
+  const inset = 16
+  const innerHeight = height - inset
+  const min = Math.round(height * 0.6)
+  const max = Math.round(height * 3.2)
+  const width = Math.max(min, Math.min(max, Math.round(innerHeight * aspect) + inset))
+  if (width === dynamicWidth) return
+  dynamicWidth = width
+  if (win && !win.isDestroyed() && !placementMode) positionWindow()
+}
+
+function enterPlacement() {
+  if (!win || win.isDestroyed()) return
+  placementMode = true
+  positionWindow()
+  win.setMovable(true)
+  win.webContents.send('overlay-mode', 'placement')
+  win.show()
+  win.focus()
+}
+
+function exitPlacement(save) {
+  if (!win || win.isDestroyed()) return
+  if (save) {
+    const bounds = win.getBounds()
+    const display = screen.getDisplayMatching(bounds)
+    const area = display.workArea
+    const anchorX = bounds.x + bounds.width / 2 < area.x + area.width / 2 ? 'left' : 'right'
+    const anchorY = bounds.y + bounds.height / 2 < area.y + area.height / 2 ? 'top' : 'bottom'
+    config.placement = {
+      displayId: display.id,
+      anchorX,
+      anchorY,
+      offsetX: anchorX === 'right' ? area.x + area.width - (bounds.x + bounds.width) : bounds.x - area.x,
+      offsetY: anchorY === 'bottom' ? area.y + area.height - (bounds.y + bounds.height) : bounds.y - area.y
+    }
+    saveConfig(config)
+  }
+  placementMode = false
+  win.setMovable(false)
+  win.webContents.send('overlay-mode', 'event')
+  win.hide()
+  buildMenu()
+}
+
+function resetPlacement() {
+  if (!config) return
+  delete config.placement
+  saveConfig(config)
+  buildMenu()
 }
 
 function createWindow() {
@@ -159,6 +239,7 @@ function defaultPrefs() {
     clickAction: 'event',
     showAllObjectsInFrame: true,
     showBoundingBoxes: true,
+    dynamicSize: true,
     autoUpdate: false,
     showDock: false,
     openAtLogin: false,
@@ -178,6 +259,7 @@ function loadPrefs() {
     clickAction: saved.clickAction != null ? saved.clickAction : base.clickAction,
     showAllObjectsInFrame: saved.showAllObjectsInFrame != null ? saved.showAllObjectsInFrame : base.showAllObjectsInFrame,
     showBoundingBoxes: saved.showBoundingBoxes != null ? saved.showBoundingBoxes : base.showBoundingBoxes,
+    dynamicSize: saved.dynamicSize != null ? saved.dynamicSize : base.dynamicSize,
     autoUpdate: saved.autoUpdate != null ? saved.autoUpdate : base.autoUpdate,
     showDock: saved.showDock != null ? saved.showDock : base.showDock,
     openAtLogin: saved.openAtLogin != null ? saved.openAtLogin : base.openAtLogin,
@@ -212,6 +294,13 @@ function applyRuntimePrefs(opts) {
   if (opts.clickAction) prefs.clickAction = opts.clickAction
   if (typeof opts.showAllObjectsInFrame === 'boolean') prefs.showAllObjectsInFrame = opts.showAllObjectsInFrame
   if (typeof opts.showBoundingBoxes === 'boolean') prefs.showBoundingBoxes = opts.showBoundingBoxes
+  if (typeof opts.dynamicSize === 'boolean') {
+    prefs.dynamicSize = opts.dynamicSize
+    if (!prefs.dynamicSize) {
+      dynamicWidth = null
+      if (win && !win.isDestroyed()) positionWindow()
+    }
+  }
   if (opts.cameras && typeof opts.cameras === 'object') {
     for (const [name, on] of Object.entries(opts.cameras)) {
       prefs.cameras[name] = !!on
@@ -292,7 +381,23 @@ function buildMenu() {
         savePrefs()
       }
     },
+    {
+      label: 'Match camera aspect ratio',
+      type: 'checkbox',
+      checked: prefs.dynamicSize !== false,
+      click: (item) => {
+        prefs.dynamicSize = item.checked
+        if (!item.checked) {
+          dynamicWidth = null
+          if (win && !win.isDestroyed()) positionWindow()
+        }
+        savePrefs()
+      }
+    },
     { label: 'Dismiss after', submenu: dismissItems },
+    { type: 'separator' },
+    { label: 'Set overlay position…', click: () => enterPlacement() },
+    ...(config && config.placement ? [{ label: 'Reset overlay position', click: () => resetPlacement() }] : []),
     { type: 'separator' },
     { label: 'Check for updates…', click: () => checkForUpdates(true) },
     {
@@ -321,6 +426,7 @@ function createTray() {
 }
 
 function handleEvent(data) {
+  if (placementMode) return
   const after = data.after || data.before
   if (!after || !after.label) return
 
@@ -449,7 +555,7 @@ function openSetup() {
   }
   setupWin = new BrowserWindow({
     width: 460,
-    height: appStarted ? 1020 : 796,
+    height: appStarted ? 1060 : 796,
     resizable: false,
     fullscreenable: false,
     maximizable: false,
@@ -694,6 +800,9 @@ app.whenReady().then(() => {
       shell.openExternal(url)
     }
   })
+  ipcMain.on('placement-save', () => exitPlacement(true))
+  ipcMain.on('placement-cancel', () => exitPlacement(false))
+  ipcMain.on('overlay-resize', (e, aspect) => setDynamicWidth(aspect))
   ipcMain.handle('setup-load', () => readConfig())
   ipcMain.handle('setup-test', (e, cfg) => testConnection(cfg))
   ipcMain.handle('setup-load-prefs', () => {
@@ -713,6 +822,7 @@ app.whenReady().then(() => {
       dismissSeconds: p && p.dismissSeconds != null ? p.dismissSeconds : 8,
       showAllObjectsInFrame: p && p.showAllObjectsInFrame !== false,
       showBoundingBoxes: p && p.showBoundingBoxes !== false,
+      dynamicSize: p && p.dynamicSize !== false,
       cameras
     }
   })

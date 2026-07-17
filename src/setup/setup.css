@@ -34,21 +34,29 @@ body {
   gap: 18px;
 }
 
-.camera-list {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  max-height: 160px;
+select.camera-list {
+  appearance: none;
+  height: auto;
+  max-height: 168px;
+  padding: 5px;
   overflow-y: auto;
+  cursor: default;
 }
 
-.camera-list .check {
-  font-size: 13px;
+select.camera-list option {
+  padding: 8px 10px;
+  border-radius: 6px;
+  color: var(--text);
 }
 
-.camera-list .empty {
+select.camera-list option:checked {
+  background: var(--accent) linear-gradient(0deg, var(--accent) 0%, var(--accent) 100%);
+  color: #07140c;
+  font-weight: 600;
+}
+
+select.camera-list option:disabled {
   color: var(--muted);
-  font-size: 12px;
 }
 
 header h1 {

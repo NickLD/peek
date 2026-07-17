@@ -25,6 +25,9 @@ const bboxCanvas = document.getElementById('bbox-canvas')
 const bboxCtx = bboxCanvas.getContext('2d')
 const poster = document.getElementById('poster')
 const closeBtn = document.getElementById('close')
+const placementEl = document.getElementById('placement')
+const placementLock = document.getElementById('placement-lock')
+const placementCancel = document.getElementById('placement-cancel')
 
 const activeEvents = new Map()
 const colorMap = new Map()
@@ -179,6 +182,9 @@ function applyVideoSettings(muted) {
     stream.video.disableRemotePlayback = true
     stream.video.addEventListener('playing', () => {
       poster.style.opacity = '0'
+      const vw = stream.video.videoWidth
+      const vh = stream.video.videoHeight
+      if (vw && vh) window.overlay.resize(vw / vh)
       drawBoxes()
     }, { once: true })
   } else {
@@ -286,3 +292,10 @@ closeBtn.addEventListener('click', (e) => {
 card.addEventListener('click', () => {
   if (activeClickUrl) window.overlay.openUrl(activeClickUrl)
 })
+
+window.overlay.onMode((mode) => {
+  placementEl.classList.toggle('hidden', mode !== 'placement')
+})
+
+placementLock.addEventListener('click', () => window.overlay.lockPlacement())
+placementCancel.addEventListener('click', () => window.overlay.cancelPlacement())

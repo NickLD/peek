@@ -16,6 +16,7 @@ const fields = {
   snapshot: el('snapshot'),
   showAllObjectsInFrame: el('showAllObjectsInFrame'),
   showBoundingBoxes: el('showBoundingBoxes'),
+  dynamicSize: el('dynamicSize'),
   dismiss: el('dismiss'),
   clickAction: el('clickAction')
 }
@@ -107,39 +108,42 @@ function buildCameraList(cameras) {
   const container = el('cameraList')
   container.innerHTML = ''
   if (!cameras.length) {
-    const span = document.createElement('span')
-    span.className = 'empty'
-    span.textContent = 'Waiting for events…'
-    container.appendChild(span)
+    const opt = document.createElement('option')
+    opt.disabled = true
+    opt.textContent = 'Waiting for events…'
+    container.appendChild(opt)
     return
   }
   for (const cam of cameras) {
-    const label = document.createElement('label')
-    label.className = 'check'
-    const input = document.createElement('input')
-    input.type = 'checkbox'
-    input.checked = cam.enabled !== false
-    input.dataset.camera = cam.name
-    const text = document.createElement('span')
-    text.className = 'check-text'
-    text.textContent = cam.label || cam.name
-    label.appendChild(input)
-    label.appendChild(text)
-    container.appendChild(label)
+    const opt = document.createElement('option')
+    opt.value = cam.name
+    opt.textContent = cam.label || cam.name
+    opt.selected = cam.enabled !== false
+    container.appendChild(opt)
   }
 }
+
+el('cameraList').addEventListener('mousedown', (e) => {
+  const opt = e.target
+  if (opt.tagName !== 'OPTION' || opt.disabled) return
+  e.preventDefault()
+  opt.selected = !opt.selected
+  opt.parentNode.focus()
+})
 
 function runtimeOpts() {
   if (!started) return {}
   const cameras = {}
-  el('cameraList').querySelectorAll('input[data-camera]').forEach(input => {
-    cameras[input.dataset.camera] = input.checked
+  Array.from(el('cameraList').options).forEach(opt => {
+    if (opt.disabled) return
+    cameras[opt.value] = opt.selected
   })
   return {
     sound: fields.sound.checked,
     snapshot: fields.snapshot.checked,
     showAllObjectsInFrame: fields.showAllObjectsInFrame.checked,
     showBoundingBoxes: fields.showBoundingBoxes.checked,
+    dynamicSize: fields.dynamicSize.checked,
     dismissSeconds: Number(fields.dismiss.value),
     clickAction: fields.clickAction.value,
     cameras
@@ -167,6 +171,7 @@ async function init() {
     fields.snapshot.checked = !!p.snapshot
     fields.showAllObjectsInFrame.checked = p.showAllObjectsInFrame !== false
     fields.showBoundingBoxes.checked = p.showBoundingBoxes !== false
+    fields.dynamicSize.checked = p.dynamicSize !== false
     fields.dismiss.value = String(p.dismissSeconds != null ? p.dismissSeconds : 8)
     fields.clickAction.value = (p && p.clickAction) || 'event'
     buildCameraList(p.cameras || [])
