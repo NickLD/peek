@@ -32,10 +32,14 @@ let frigatePin = null
 let frigateToken = null
 let tokenRefreshTimer = null
 let mqttClient = null
+let frigateAvailable = true
+let reauthInFlight = false
+let lastReauthAttempt = 0
 let cameraStreamMap = {}
 let cameraDetectMap = {}
 let certProcSet = false
 const knownCameras = new Set()
+const REAUTH_MIN_INTERVAL_MS = 10000
 
 const DISMISS_OPTIONS = [
   { label: '3 seconds', value: 3 },
@@ -469,9 +473,17 @@ function handleEvent(data) {
 
 function startMqtt() {
   const prefix = config.topicPrefix || 'frigate'
+  const availableTopic = `${prefix}/available`
   mqttClient = mqtt.connect(config.mqtt, { reconnectPeriod: 3000 })
-  mqttClient.on('connect', () => mqttClient.subscribe(`${prefix}/events`))
+  mqttClient.on('connect', () => {
+    mqttClient.subscribe(`${prefix}/events`)
+    mqttClient.subscribe(availableTopic)
+  })
   mqttClient.on('message', (topic, payload) => {
+    if (topic === availableTopic) {
+      handleFrigateAvailability(payload.toString())
+      return
+    }
     let data
     try {
       data = JSON.parse(payload.toString())
@@ -480,6 +492,18 @@ function startMqtt() {
     }
     handleEvent(data)
   })
+}
+
+// Frigate publishes a retained online/offline message on this topic on startup/shutdown.
+// A transition to online means Frigate (re)started, so any cached JWT/cert pin is suspect.
+function handleFrigateAvailability(status) {
+  const wasAvailable = frigateAvailable
+  frigateAvailable = status === 'online'
+  console.log('[peek] frigate/available: ' + status)
+  if (frigateAvailable && !wasAvailable) {
+    console.log('[peek] frigate came back online, reauthenticating')
+    requestReauth()
+  }
 }
 
 function applyCertPin() {
@@ -516,9 +540,12 @@ function scheduleTokenRefresh(token) {
   tokenRefreshTimer = setTimeout(() => initFrigateAuth(), delay)
 }
 
+// Returns true on success, false on failure (never rejects, callers don't have to catch).
 async function initFrigateAuth() {
-  if (!config || !config.frigateUser || !frigateAuth.isHttps(config.frigateUrl)) return
+  if (!config || !config.frigateUser || !frigateAuth.isHttps(config.frigateUrl)) return true
+  console.log('[frigate-auth] logging in...')
   try {
+    const previousPin = frigatePin ? frigatePin.certSha256 : null
     const { token, certSha256 } = await frigateAuth.login(config.frigateUrl, config.frigateUser, config.frigatePassword)
     frigateToken = token
     frigatePin = { host: new URL(config.frigateUrl).hostname, certSha256 }
@@ -533,9 +560,50 @@ async function initFrigateAuth() {
       sameSite: 'no_restriction'
     })
     scheduleTokenRefresh(token)
+    console.log('[frigate-auth] login OK, cookie refreshed' + (previousPin && previousPin !== certSha256 ? ' (cert pin changed since last login)' : ''))
+    if (win && !win.isDestroyed()) win.webContents.send('frigate-reauthed')
+    return true
   } catch (err) {
     console.error('[frigate-auth] ' + err.message)
+    return false
   }
+}
+
+const REAUTH_RETRY_DELAY_MS = 5000
+const REAUTH_MAX_RETRIES = 3
+
+// Right after Frigate restarts, its reverse proxy can come up before the backend is actually
+// ready to serve /api/login (502). Retry a few times with a short delay instead of giving up
+// and waiting for some unrelated later trigger (e.g. a stray failed detection) to try again.
+function attemptReauth(retriesLeft) {
+  initFrigateAuth().then((ok) => {
+    if (ok) {
+      reauthInFlight = false
+      fetchFrigateConfig(frigateToken)
+      return
+    }
+    if (retriesLeft > 0) {
+      console.log(`[peek] reauth failed, retrying in ${REAUTH_RETRY_DELAY_MS / 1000}s (${retriesLeft} attempt(s) left)`)
+      setTimeout(() => attemptReauth(retriesLeft - 1), REAUTH_RETRY_DELAY_MS)
+    } else {
+      console.log('[peek] reauth retries exhausted, giving up until the next trigger')
+      reauthInFlight = false
+    }
+  })
+}
+
+// Entry point for reauth triggered by a recovery signal (Frigate back online, a stream/
+// snapshot request failing) rather than the routine boot/scheduled-refresh calls. Throttled
+// so a burst of failures (e.g. Frigate genuinely unreachable) doesn't hammer the login endpoint.
+function requestReauth() {
+  const now = Date.now()
+  if (reauthInFlight || now - lastReauthAttempt < REAUTH_MIN_INTERVAL_MS) {
+    console.log('[peek] reauth request skipped (already in flight or throttled)')
+    return
+  }
+  lastReauthAttempt = now
+  reauthInFlight = true
+  attemptReauth(REAUTH_MAX_RETRIES)
 }
 
 function startApp() {
@@ -788,12 +856,17 @@ app.whenReady().then(() => {
 
   const { powerMonitor } = require('electron')
   powerMonitor.on('resume', () => {
+    console.log('[peek] system resumed from sleep, reconnecting MQTT and reauthenticating')
     if (mqttClient) mqttClient.reconnect()
     initFrigateAuth()
   })
 
   ipcMain.on('overlay-hide', () => {
     if (win && !win.isDestroyed()) win.hide()
+  })
+  ipcMain.on('overlay-stream-failed', () => {
+    console.log('[peek] renderer reported a failed snapshot/stream request')
+    requestReauth()
   })
   ipcMain.on('overlay-open-url', (e, url) => {
     if (typeof url === 'string' && config && config.frigateUrl && url.startsWith(config.frigateUrl)) {
